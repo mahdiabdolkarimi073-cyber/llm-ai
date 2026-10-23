@@ -1,1014 +1,400 @@
-"""ChatGPT-style chat interface built with NiceGUI.
+"""Persian RTL chat UI for the local LLM, served on port 8080."""
 
-Features:
-  - Persian, RTL, dark-mode, responsive design
-  - Sidebar: new chat, history, delete chats
-  - User/model message bubbles with code formatting
-  - Multi-line input: Enter to send, Shift+Enter for newline
-  - Streaming token-by-token generation, stop button
-  - Copy response/code, auto-scroll, real model status
-  - Thread-safe generation (UI never freezes)
-  - Port 8080 (avoids 5173 and 8000)
-
-Usage:
-    pip install nicegui torch
-    python llm/chat_app.py
-"""
-
-import os
-import sys
+import html
 import json
-import time
+import os
+import queue
+import re
 import threading
+import time
+import uuid
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from nicegui import ui, app
+from nicegui import ui
 
 from chat_model import ChatModelEngine, ModelLoadError
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-CHAT_PORT = 8080
-HISTORY_DIR = os.path.join(os.path.dirname(__file__), "chat_history")
-os.makedirs(HISTORY_DIR, exist_ok=True)
-HISTORY_FILE = os.path.join(HISTORY_DIR, "conversations.json")
 
-# ---------------------------------------------------------------------------
-# Global model engine
-# ---------------------------------------------------------------------------
+CHAT_PORT = 8080
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+HISTORY_DIR = os.path.join(BASE_DIR, "chat_history")
+HISTORY_FILE = os.path.join(HISTORY_DIR, "conversations.json")
 engine = ChatModelEngine()
 
-# ---------------------------------------------------------------------------
-# Conversation storage
-# ---------------------------------------------------------------------------
 
-def load_conversations() -> list[dict]:
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
-
-
-def save_conversations(conversations: list[dict]):
-    tmp = HISTORY_FILE + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(conversations, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, HISTORY_FILE)
-    except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-
-
-# ---------------------------------------------------------------------------
-# CSS: modern, minimal, dark, RTL, Persian
-# ---------------------------------------------------------------------------
-CUSTOM_CSS = """
+CSS = """
 <style>
 :root {
-  --bg-primary: #0f0f0f;
-  --bg-secondary: #1a1a1a;
-  --bg-tertiary: #242424;
-  --bg-input: #2a2a2a;
-  --text-primary: #e8e8e8;
-  --text-secondary: #a0a0a0;
-  --text-muted: #6b6b6b;
-  --accent: #3b82f6;
-  --accent-hover: #2563eb;
-  --accent-light: #60a5fa;
-  --user-bubble: #2563eb;
-  --model-bubble: #242424;
-  --border: #333333;
-  --error: #ef4444;
-  --success: #22c55e;
-  --warning: #f59e0b;
-  --code-bg: #1e1e1e;
-  --code-border: #383838;
+  --bg: #111213; --panel: #18191b; --panel-2: #202225; --panel-3: #292b2f;
+  --line: #303238; --text: #f2f3f5; --muted: #9da1aa; --dim: #696e78;
+  --blue: #4b8df8; --blue-2: #2f6fe4; --green: #35c77a; --red: #ed6a75;
 }
-
 * { box-sizing: border-box; }
-
-body {
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-family: 'Vazirmatn', 'Segoe UI', Tahoma, sans-serif;
-  margin: 0;
-  padding: 0;
-  direction: rtl;
-  height: 100vh;
-  overflow: hidden;
-}
-
-/* Main layout */
-.app-container {
-  display: flex;
-  height: 100vh;
-  width: 100vw;
-}
-
-/* Sidebar */
-.sidebar {
-  width: 280px;
-  min-width: 280px;
-  background: var(--bg-secondary);
-  border-left: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  transition: width 0.3s ease;
-}
-
-.sidebar-header {
-  padding: 16px;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.sidebar-header h2 {
-  font-size: 16px;
-  font-weight: 600;
-  margin: 0;
-  color: var(--text-primary);
-}
-
-.sidebar-new-chat {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.sidebar-history {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px;
-}
-
-.sidebar-footer {
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-/* Conversation list items */
-.conv-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  margin-bottom: 4px;
-  transition: background 0.15s;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.conv-item:hover {
-  background: var(--bg-tertiary);
-}
-
-.conv-item.active {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  border-right: 3px solid var(--accent);
-}
-
-.conv-item-title {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.conv-delete-btn {
-  opacity: 0;
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
-  font-size: 14px;
-  transition: opacity 0.15s, color 0.15s;
-}
-
-.conv-item:hover .conv-delete-btn {
-  opacity: 1;
-}
-
-.conv-delete-btn:hover {
-  color: var(--error);
-}
-
-/* Chat area */
-.chat-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-primary);
-}
-
-.chat-header {
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: var(--bg-secondary);
-}
-
-.chat-header-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 12px;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.status-badge.loaded {
-  background: rgba(34, 197, 94, 0.15);
-  color: var(--success);
-}
-
-.status-badge.unloaded {
-  background: rgba(239, 68, 68, 0.15);
-  color: var(--error);
-}
-
-.status-badge.loading {
-  background: rgba(245, 158, 11, 0.15);
-  color: var(--warning);
-}
-
-.status-badge.generating {
-  background: rgba(59, 130, 246, 0.15);
-  color: var(--accent-light);
-}
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.status-dot.loaded { background: var(--success); }
-.status-dot.unloaded { background: var(--error); }
-.status-dot.loading { background: var(--warning); animation: pulse 1s infinite; }
-.status-dot.generating { background: var(--accent-light); animation: pulse 0.8s infinite; }
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
-
-/* Messages area */
-.messages-area {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.message-bubble {
-  max-width: 80%;
-  padding: 14px 18px;
-  border-radius: 14px;
-  font-size: 14px;
-  line-height: 1.7;
-  word-wrap: break-word;
-  position: relative;
-  animation: fadeIn 0.2s ease;
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.message-user {
-  background: var(--user-bubble);
-  color: #ffffff;
-  align-self: flex-end;
-  border-bottom-left-radius: 4px;
-}
-
-.message-model {
-  background: var(--model-bubble);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  align-self: flex-start;
-  border-bottom-right-radius: 4px;
-}
-
-.message-error {
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid var(--error);
-  color: var(--error);
-  align-self: center;
-  text-align: center;
-  font-size: 13px;
-}
-
-.message-role-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-bottom: 6px;
-  font-weight: 600;
-}
-
-.message-user .message-role-label {
-  color: rgba(255,255,255,0.7);
-}
-
-/* Code blocks */
-.message-bubble pre {
-  background: var(--code-bg);
-  border: 1px solid var(--code-border);
-  border-radius: 8px;
-  padding: 12px;
-  overflow-x: auto;
-  margin: 8px 0;
-  font-size: 13px;
-  font-family: 'Fira Code', 'Consolas', monospace;
-  direction: ltr;
-  text-align: left;
-}
-
-.message-bubble code {
-  font-family: 'Fira Code', 'Consolas', monospace;
-  font-size: 13px;
-}
-
-.message-bubble p {
-  margin: 6px 0;
-}
-
-.message-bubble p:first-child { margin-top: 0; }
-.message-bubble p:last-child { margin-bottom: 0; }
-
-/* Copy button */
-.copy-btn {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-
-.message-bubble:hover .copy-btn {
-  opacity: 1;
-}
-
-.copy-btn:hover {
-  background: var(--accent);
-  color: #fff;
-}
-
-.copy-btn.copied {
-  background: var(--success);
-  color: #fff;
-}
-
-/* Typing indicator */
-.typing-indicator {
-  display: inline-flex;
-  gap: 4px;
-  padding: 8px 0;
-}
-
-.typing-indicator span {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  animation: typingBounce 1s infinite;
-}
-
-.typing-indicator span:nth-child(2) { animation-delay: 0.15s; }
-.typing-indicator span:nth-child(3) { animation-delay: 0.3s; }
-
-@keyframes typingBounce {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
-  30% { transform: translateY(-6px); opacity: 1; }
-}
-
-/* Input area */
-.input-area {
-  padding: 16px 20px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-secondary);
-  display: flex;
-  gap: 10px;
-  align-items: flex-end;
-}
-
-.input-wrapper {
-  flex: 1;
-  position: relative;
-}
-
-.text-input {
-  width: 100%;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  color: var(--text-primary);
-  padding: 12px 16px;
-  font-size: 14px;
-  font-family: inherit;
-  resize: none;
-  min-height: 48px;
-  max-height: 160px;
-  line-height: 1.6;
-  transition: border-color 0.2s;
-  direction: rtl;
-}
-
-.text-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.send-btn {
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: 12px;
-  padding: 12px 20px;
-  font-size: 14px;
-  cursor: pointer;
-  font-weight: 600;
-  transition: background 0.2s;
-  min-width: 80px;
-}
-
-.send-btn:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-
-.send-btn:disabled {
-  background: var(--bg-tertiary);
-  color: var(--text-muted);
-  cursor: not-allowed;
-}
-
-.stop-btn {
-  background: var(--error);
-  color: #fff;
-  border: none;
-  border-radius: 12px;
-  padding: 12px 20px;
-  font-size: 14px;
-  cursor: pointer;
-  font-weight: 600;
-  transition: background 0.2s;
-  min-width: 80px;
-}
-
-.stop-btn:hover {
-  background: #dc2626;
-}
-
-/* Scrollbar */
-.messages-area::-webkit-scrollbar,
-.sidebar-history::-webkit-scrollbar {
-  width: 6px;
-}
-
-.messages-area::-webkit-scrollbar-track,
-.sidebar-history::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.messages-area::-webkit-scrollbar-thumb,
-.sidebar-history::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
-}
-
-.messages-area::-webkit-scrollbar-thumb:hover,
-.sidebar-history::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
-}
-
-/* Welcome screen */
-.welcome-screen {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  color: var(--text-muted);
-  text-align: center;
-}
-
-.welcome-screen h3 {
-  font-size: 22px;
-  color: var(--text-secondary);
-  font-weight: 600;
-}
-
-.welcome-screen p {
-  font-size: 14px;
-  max-width: 400px;
-}
-
-/* Model selector */
-.model-selector {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: center;
-  margin-top: 10px;
-}
-
-.model-option {
-  padding: 8px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.model-option:hover {
-  border-color: var(--accent);
-  color: var(--text-primary);
-}
-
-.model-option.active {
-  border-color: var(--accent);
-  background: rgba(59,130,246,0.15);
-  color: var(--accent-light);
-}
-
-.model-option.unavailable {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-/* Responsive */
-@media (max-width: 768px) {
-  .sidebar {
-    position: fixed;
-    right: 0;
-    top: 0;
-    z-index: 1000;
-    height: 100vh;
-    transform: translateX(100%);
-  }
-  .sidebar.open {
-    transform: translateX(0);
-  }
-  .message-bubble {
-    max-width: 92%;
-  }
-  .chat-header-title {
-    font-size: 13px;
-  }
-}
-
-/* Toggle button for mobile sidebar */
-.sidebar-toggle {
-  display: none;
-  background: none;
-  border: none;
-  color: var(--text-primary);
-  font-size: 20px;
-  cursor: pointer;
-  padding: 4px 8px;
-}
-
-@media (max-width: 768px) {
-  .sidebar-toggle {
-    display: block;
-  }
+html, body, #__nuxt, #q-app { width: 100%; height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); direction: rtl; overflow: hidden;
+  font-family: Vazirmatn, Tahoma, Arial, sans-serif; }
+.app-shell { width: 100%; height: 100vh; display: flex; flex-direction: row;
+  direction: rtl; background: var(--bg); }
+.sidebar { width: 286px; min-width: 286px; height: 100%; display: flex; flex-direction: column;
+  background: var(--panel); border-left: 1px solid var(--line); }
+.brand { height: 70px; padding: 0 22px; display: flex; align-items: center; gap: 10px;
+  border-bottom: 1px solid var(--line); }
+.brand-mark { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+  background: linear-gradient(145deg, #5ca1ff, #2764ca); color: white; font-size: 17px; }
+.brand-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.sidebar-content { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 14px; gap: 16px; }
+.new-chat { height: 44px; border: 1px solid #3b78d7; border-radius: 10px; background: var(--blue-2);
+  color: white; font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.new-chat:hover { background: var(--blue); }
+.section-label { color: var(--dim); font-size: 11px; font-weight: 600; padding: 0 8px; }
+.history { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.history-empty { color: var(--dim); font-size: 12px; padding: 16px 8px; text-align: center; }
+.history-row { min-height: 42px; display: flex; align-items: center; gap: 4px; padding: 0 8px;
+  border-radius: 9px; color: var(--muted); cursor: pointer; }
+.history-row:hover, .history-row.active { background: var(--panel-3); color: var(--text); }
+.history-row.active { box-shadow: inset -2px 0 var(--blue); }
+.history-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; }
+.history-delete { width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--dim); cursor: pointer; opacity: 0; }
+.history-row:hover .history-delete { opacity: 1; }
+.history-delete:hover { color: var(--red); background: #3b272b; }
+.model-panel { border-top: 1px solid var(--line); padding-top: 14px; }
+.model-select { width: 100%; margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--panel-2); color: var(--text); font: 12px Vazirmatn; }
+.model-select option { background: var(--panel-2); }
+.model-state { margin-top: 9px; color: var(--muted); font-size: 11px; line-height: 1.8; }
+.status-dot { display: inline-block; width: 7px; height: 7px; margin-left: 5px; border-radius: 50%; background: var(--dim); }
+.status-dot.ready { background: var(--green); box-shadow: 0 0 0 3px #1d3c2b; }
+.status-dot.busy { background: #e7aa45; animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.sidebar-footer { padding: 13px 22px; border-top: 1px solid var(--line); color: var(--dim); font-size: 10px; }
+.chat-main { min-width: 0; flex: 1; height: 100%; display: flex; flex-direction: column; background: var(--bg); }
+.chat-header { height: 70px; min-height: 70px; padding: 0 28px; display: flex; align-items: center;
+  justify-content: space-between; border-bottom: 1px solid var(--line); background: rgba(24,25,27,.86); }
+.chat-heading { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.chat-title { margin: 0; font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-subtitle { color: var(--muted); font-size: 11px; }
+.header-status { display: flex; align-items: center; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.messages-scroll { flex: 1; min-height: 0; width: 100%; background: var(--bg); }
+.messages-inner { width: min(920px, calc(100% - 48px)); min-height: 100%; margin: 0 auto; padding: 34px 0 30px;
+  display: flex; flex-direction: column; gap: 22px; }
+.welcome { flex: 1; min-height: 420px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; color: var(--muted); gap: 12px; }
+.welcome-icon { width: 58px; height: 58px; border-radius: 18px; display: grid; place-items: center;
+  background: #1d3155; color: #75aaff; font-size: 27px; }
+.welcome-title { margin: 6px 0 0; color: var(--text); font-size: 22px; }
+.welcome p { margin: 0; max-width: 480px; font-size: 13px; line-height: 1.9; }
+.message-line { width: 100%; display: flex; }
+.message-line.user { justify-content: flex-start; }
+.message-line.model, .message-line.error { justify-content: flex-end; }
+.message { max-width: min(790px, 88%); padding: 15px 18px; border-radius: 14px; line-height: 1.85; font-size: 14px;
+  overflow-wrap: anywhere; position: relative; }
+.message.user { background: var(--blue-2); color: white; border-bottom-right-radius: 4px; }
+.message.model { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); border-bottom-left-radius: 4px; }
+.message.error { background: #3a2024; border: 1px solid #804049; color: #ffadb3; }
+.role { margin-bottom: 7px; color: rgba(255,255,255,.66); font-size: 10px; font-weight: 700; }
+.model .role { color: var(--muted); }
+.message p { margin: 0 0 9px; }
+.message p:last-child { margin-bottom: 0; }
+.message pre { direction: ltr; text-align: left; overflow-x: auto; margin: 12px 0 2px; padding: 14px; border-radius: 9px;
+  background: #111315; border: 1px solid #3a3d43; color: #e7e9ed; font: 13px/1.65 Consolas, "Fira Code", monospace; white-space: pre; }
+.copy { position: absolute; left: 8px; top: 8px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel-3); color: var(--muted); font: 10px Vazirmatn; cursor: pointer; opacity: 0; }
+.message:hover .copy { opacity: 1; }
+.copy:hover { color: white; background: var(--blue-2); }
+.composer-wrap { padding: 0 24px 22px; background: var(--bg); }
+.composer { width: min(920px, 100%); margin: 0 auto; display: flex; align-items: flex-end; gap: 9px; padding: 8px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 15px; box-shadow: 0 9px 30px rgba(0,0,0,.22); }
+.composer textarea { flex: 1; min-height: 46px; max-height: 170px; padding: 11px 12px; resize: none; border: 0; outline: 0;
+  background: transparent; color: var(--text); font: 13px/1.7 Vazirmatn; direction: rtl; }
+.composer textarea::placeholder { color: var(--dim); }
+.send, .stop { width: 42px; height: 42px; flex: 0 0 42px; border: 0; border-radius: 11px; color: white; cursor: pointer; font-size: 17px; }
+.send { background: var(--blue-2); }.send:hover { background: var(--blue); }.stop { background: #9e3541; }.stop:hover { background: #c44755; }
+.composer-hint { width: min(920px, 100%); margin: 8px auto 0; color: var(--dim); text-align: center; font-size: 10px; }
+@media (max-width: 760px) {
+  .sidebar { width: 230px; min-width: 230px; }
+  .chat-header { padding: 0 15px; }.messages-inner { width: calc(100% - 24px); padding-top: 22px; }
+  .message { max-width: 94%; }.composer-wrap { padding: 0 10px 12px; }.composer-hint { display: none; }
+}
+@media (max-width: 560px) {
+  .sidebar { width: 205px; min-width: 205px; }.brand { padding: 0 14px; }.sidebar-content { padding: 10px; }
+  .chat-subtitle { display: none; }.header-status { font-size: 10px; }.message { font-size: 13px; }
 }
 </style>
 """
 
-# ---------------------------------------------------------------------------
-# Helper: escape HTML
-# ---------------------------------------------------------------------------
-def escape_html(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+
+def load_conversations() -> list[dict]:
+    if not os.path.isfile(HISTORY_FILE):
+        return []
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_conversations(conversations: list[dict]) -> None:
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    temporary = HISTORY_FILE + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as file:
+        json.dump(conversations, file, ensure_ascii=False, indent=2)
+    os.replace(temporary, HISTORY_FILE)
 
 
 def format_message_content(text: str) -> str:
-    """Format message text with basic code block support."""
-    import re
-    escaped = escape_html(text)
-    # Code blocks: ```lang\ncode``` -> <pre><code>code</code></pre>
-    parts = re.split(r"```(\w*)\n(.*?)```", escaped, flags=re.DOTALL)
-    if len(parts) == 1:
-        # No code blocks — convert newlines to <br> and wrap in <p>
-        paragraphs = escaped.split("\n\n")
-        return "".join(f"<p>{p.replace(chr(10), '<br>')}</p>" for p in paragraphs if p.strip())
-
-    result = []
-    i = 0
-    while i < len(parts):
-        if i % 3 == 0:
-            # Regular text
-            if parts[i].strip():
-                paragraphs = parts[i].strip().split("\n\n")
-                for p in paragraphs:
-                    if p.strip():
-                        result.append(f"<p>{p.replace(chr(10), '<br>')}</p>")
-        elif i % 3 == 1:
-            # Language tag — skip
-            pass
-        else:
-            # Code content
-            lang = parts[i - 1] if i >= 1 else ""
-            code = parts[i]
-            result.append(f'<pre><code>{code}</code></pre>')
-        i += 1
-    return "".join(result)
+    escaped = html.escape(text)
+    pattern = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+    result: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(escaped):
+        result.append(_format_plain(escaped[cursor:match.start()]))
+        result.append(f"<pre><code>{match.group(2)}</code></pre>")
+        cursor = match.end()
+    result.append(_format_plain(escaped[cursor:]))
+    return "".join(part for part in result if part)
 
 
-# ---------------------------------------------------------------------------
-# UI state
-# ---------------------------------------------------------------------------
-class AppState:
-    def __init__(self):
-        self.conversations: list[dict] = load_conversations()
-        self.current_conv_id: str | None = None
-        self.is_generating: bool = False
-        self.gen_thread: threading.Thread | None = None
+def _format_plain(text: str) -> str:
+    if not text.strip():
+        return ""
+    return "".join(
+        f"<p>{html.escape(part) if False else part.replace(chr(10), '<br>')}</p>"
+        for part in text.split("\n\n") if part.strip()
+    )
 
-
-state = AppState()
-
-
-def get_current_conversation() -> dict | None:
-    if state.current_conv_id is None:
-        return None
-    for conv in state.conversations:
-        if conv["id"] == state.current_conv_id:
-            return conv
-    return None
-
-
-# ---------------------------------------------------------------------------
-# UI rebuild helpers
-# ---------------------------------------------------------------------------
-
-def render_sidebar_history(container):
-    """Re-render the conversation list in the sidebar."""
-    container.clear()
-    with container:
-        if not state.conversations:
-            ui.label("هنوز گفت‌وگویی وجود ندارد.").classes("text-sm text-gray-500 p-3")
-        for conv in state.conversations:
-            item_classes = "conv-item"
-            if conv["id"] == state.current_conv_id:
-                item_classes += " active"
-            with ui.row().classes(item_classes).on("click", lambda c=conv: select_conversation(c["id"])):
-                ui.label(conv.get("title", "گفت‌وگوی جدید")).classes("conv-item-title")
-                ui.button(icon="delete", on_click=lambda e, c=conv: delete_conversation(c["id"])).classes("conv-delete-btn").props("flat dense size=sm")
-
-
-def select_conversation(conv_id: str):
-    state.current_conv_id = conv_id
-    ui.navigate.reload()
-
-
-def delete_conversation(conv_id: str):
-    state.conversations = [c for c in state.conversations if c["id"] != conv_id]
-    if state.current_conv_id == conv_id:
-        state.current_conv_id = None
-    save_conversations(state.conversations)
-    ui.navigate.reload()
-
-
-def new_conversation():
-    import uuid
-    conv = {
-        "id": str(uuid.uuid4())[:8],
-        "title": "گفت‌وگوی جدید",
-        "messages": [],
-        "created": time.strftime("%Y-%m-%d %H:%M"),
-    }
-    state.conversations.insert(0, conv)
-    state.current_conv_id = conv["id"]
-    save_conversations(state.conversations)
-    ui.navigate.reload()
-
-
-# ---------------------------------------------------------------------------
-# Main page
-# ---------------------------------------------------------------------------
 
 @ui.page("/")
-def main_page():
-    ui.add_head_html(CUSTOM_CSS)
-    ui.add_head_html('<link rel="preconnect" href="https://fonts.googleapis.com">')
-    ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700&display=swap" rel="stylesheet">')
+def main_page() -> None:
+    ui.add_head_html(CSS)
+    conversations = load_conversations()
+    current_id: str | None = None
+    current_conv: dict | None = None
+    events: queue.Queue[dict] = queue.Queue()
+    generating = False
+    worker: threading.Thread | None = None
 
-    # --- Layout ---
-    with ui.column().classes("app-container"):
+    with ui.row().classes("app-shell"):
+        with ui.column().classes("sidebar"):
+            with ui.row().classes("brand"):
+                ui.html('<div class="brand-mark">✦</div>')
+                ui.label("دستیار هوش مصنوعی").classes("brand-title")
+            with ui.column().classes("sidebar-content"):
+                new_button = ui.button("گفت‌وگوی جدید  ＋").classes("new-chat")
+                ui.label("گفت‌وگوهای اخیر").classes("section-label")
+                history = ui.column().classes("history")
+                with ui.column().classes("model-panel"):
+                    ui.label("مدل محلی").classes("section-label")
+                    model_select = ui.select({}, value=None).classes("model-select")
+                    model_state = ui.label("").classes("model-state")
+            ui.label("فقط اجرای محلی؛ بدون API خارجی").classes("sidebar-footer")
 
-        # --- Sidebar ---
-        with ui.column().classes("sidebar") as sidebar:
-            with ui.row().classes("sidebar-header"):
-                ui.icon("chat", color="primary").style("font-size: 22px;")
-                ui.html("<h2>دستیار هوش مصنوعی</h2>")
-
-            with ui.column().classes("sidebar-new-chat"):
-                ui.button("گفت‌وگوی جدید", icon="add", on_click=new_conversation).props("unelevated color=primary").classes("w-full")
-
-            history_container = ui.column().classes("sidebar-history")
-            render_sidebar_history(history_container)
-
-            with ui.column().classes("sidebar-footer"):
-                status_text = "مدل: بارگذاری نشده"
-                ui.label(status_text).bind_text_from(
-                    engine, "_loaded",
-                    backward=lambda v: "مدل: بارگذاری شده" if v else "مدل: بارگذاری نشده"
-                )
-
-        # --- Chat area ---
-        with ui.column().classes("chat-area"):
-            # Header
+        with ui.column().classes("chat-main"):
             with ui.row().classes("chat-header"):
-                ui.button(icon="menu", on_click=lambda: sidebar.classes(add="open")).classes("sidebar-toggle").props("flat dense")
-                title_label = ui.label("").classes("chat-header-title")
+                with ui.column().classes("chat-heading"):
+                    heading = ui.label("گفت‌وگوی جدید").classes("chat-title")
+                    subtitle = ui.label("مدل زبانی اختصاصی شما").classes("chat-subtitle")
+                header_status = ui.label("").classes("header-status")
 
-                status_badge_container = ui.row().classes("status-badge-container")
+            with ui.scroll_area().classes("messages-scroll"):
+                messages = ui.column().classes("messages-inner")
 
-            # Messages
-            messages_scroll = ui.scroll_area().classes("messages-area")
-            messages_container = ui.column().classes("messages-container w-full")
+            with ui.column().classes("composer-wrap"):
+                with ui.row().classes("composer"):
+                    text_input = ui.textarea(placeholder="پیام خود را بنویسید...").props("autofocus")
+                    send_button = ui.button(icon="arrow_upward").classes("send")
+                    stop_button = ui.button(icon="stop").classes("stop")
+                ui.label("Enter برای ارسال · Shift+Enter برای خط جدید").classes("composer-hint")
 
-            # Input
-            with ui.row().classes("input-area"):
-                input_wrapper = ui.column().classes("input-wrapper")
-                with input_wrapper:
-                    text_input = ui.textarea(
-                        placeholder="پیام خود را بنویسید... (Enter برای ارسال، Shift+Enter برای خط جدید)",
-                    ).classes("text-input").props("autofocus")
+    def find_conversation(conversation_id: str | None) -> dict | None:
+        return next((item for item in conversations if item.get("id") == conversation_id), None)
 
-                send_btn = ui.button("ارسال", icon="send").classes("send-btn").props("unelevated color=primary")
-                stop_btn = ui.button("توقف", icon="stop").classes("stop-btn").props("unelevated color=negative")
-                stop_btn.set_visibility(False)
+    def render_history() -> None:
+        history.clear()
+        with history:
+            if not conversations:
+                ui.label("گفت‌وگویی ثبت نشده است.").classes("history-empty")
+            for item in conversations:
+                with ui.row().classes("history-row" + (" active" if item.get("id") == current_id else "")):
+                    title = item.get("title", "گفت‌وگوی جدید")
+                    ui.label(title).classes("history-title").on("click", lambda _event, cid=item["id"]: select_conversation(cid))
+                    ui.button(icon="delete", on_click=lambda _event, cid=item["id"]: delete_conversation(cid)).classes("history-delete").props("flat dense")
 
-    # --- State setup ---
-    current_conv = get_current_conversation()
+    def render_model_choices() -> None:
+        choices = {item["key"]: item["label"] for item in engine.list_available() if item["available"]}
+        model_select.options = choices
+        model_select.update()
+        status = engine.get_status()
+        if status.get("loaded"):
+            model_select.value = status["checkpoint"]
+            model_state.text = f"● آماده · {status['context_length']} توکن زمینه · {status['params']:,} پارامتر"
+        else:
+            model_state.text = "● مدل بارگذاری نشده است"
+        model_select.update()
 
-    # Update header title
-    if current_conv:
-        title_label.text = current_conv.get("title", "گفت‌وگوی جدید")
-    else:
-        title_label.text = "دستیار هوش مصنوعی"
-
-    # Render status badge
-    def render_status_badge():
-        status_badge_container.clear()
-        status_info = engine.get_status()
-        with status_badge_container:
-            if state.is_generating:
-                with ui.row().classes("status-badge generating"):
-                    ui.html('<div class="status-dot generating"></div>')
-                    ui.label("در حال تولید...")
-            elif status_info["loaded"]:
-                with ui.row().classes("status-badge loaded"):
-                    ui.html('<div class="status-dot loaded"></div>')
-                    ui.label(f"مدل آماده — {status_info.get('label', '')}")
-            else:
-                with ui.row().classes("status-badge unloaded"):
-                    ui.html('<div class="status-dot unloaded"></div>')
-                    ui.label("مدل بارگذاری نشده")
-
-    # --- Render messages or welcome screen ---
-    def render_messages():
-        messages_container.clear()
-        with messages_container:
-            if not current_conv or not current_conv.get("messages"):
-                # Welcome / model selection screen
-                with ui.column().classes("welcome-screen"):
-                    ui.icon("hub", color="primary").style("font-size: 48px;")
-                    ui.html("<h3>به دستیار هوش مصنوعی خوش آمدید</h3>")
-                    ui.html("<p>یک گفت‌وگوی جدید شروع کنید و مدل خود را انتخاب کنید.</p>")
-
-                    # Model selector
-                    available = engine.list_available()
-                    with ui.column().classes("model-selector"):
-                        for ckpt in available:
-                            cls = "model-option"
-                            if not ckpt["available"]:
-                                cls += " unavailable"
-                            if ckpt["available"]:
-                                btn = ui.button(ckpt["label"]).classes(cls)
-                                btn.on("click", lambda k=ckpt["key"]: load_model_action(k))
-                            else:
-                                ui.button(f"{ckpt['label']} (غیرفعال)").classes(cls)
+    def render_messages() -> None:
+        messages.clear()
+        with messages:
+            if current_conv is None or not current_conv.get("messages"):
+                with ui.column().classes("welcome"):
+                    ui.html('<div class="welcome-icon">✦</div>')
+                    ui.label("چطور می‌توانم کمک کنم؟").classes("welcome-title")
+                    ui.label("یک checkpoint محلی را از نوار کناری انتخاب کنید، سپس سؤال یا درخواست کدنویسی خود را بنویسید.")
                 return
+            for item in current_conv["messages"]:
+                role = item.get("role")
+                if role not in {"user", "model", "error"}:
+                    continue
+                line_class = "user" if role == "user" else "error" if role == "error" else "model"
+                with ui.row().classes(f"message-line {line_class}"):
+                    with ui.column().classes(f"message {line_class}"):
+                        label = "شما" if role == "user" else "خطا" if role == "error" else "مدل محلی"
+                        ui.label(label).classes("role")
+                        ui.html(format_message_content(item.get("content", "")))
+                        if role == "model" and item.get("content"):
+                            ui.button("کپی", on_click=lambda _event, value=item["content"]: copy_message(value)).classes("copy").props("flat dense")
 
-            for msg in current_conv["messages"]:
-                if msg["role"] == "user":
-                    with ui.column().classes("message-bubble message-user"):
-                        ui.html("<div class='message-role-label'>شما</div>")
-                        ui.html(format_message_content(msg["content"]))
-                elif msg["role"] == "model":
-                    with ui.column().classes("message-bubble message-model"):
-                        ui.html("<div class='message-role-label'>مدل</div>")
-                        content_html = format_message_content(msg["content"])
-                        ui.html(content_html)
-                        # Copy button
-                        copy_btn = ui.button("کپی", icon="content_copy").classes("copy-btn").props("flat dense size=sm")
-                        copy_btn.on("click", lambda c=msg["content"]: copy_to_clipboard(c))
-                elif msg["role"] == "error":
-                    with ui.column().classes("message-bubble message-error"):
-                        ui.label(msg["content"])
+    def copy_message(value: str) -> None:
+        ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(value, ensure_ascii=False)})")
+        ui.notify("متن پاسخ کپی شد.", type="positive", position="top")
 
-        # Auto-scroll to bottom
-        ui.run_javascript("""
-            setTimeout(function() {
-                var el = document.querySelector('.messages-area');
-                if (el) el.scrollTop = el.scrollHeight;
-            }, 50);
-        """)
+    def select_conversation(conversation_id: str) -> None:
+        nonlocal current_id, current_conv
+        if generating:
+            ui.notify("تا پایان تولید پاسخ امکان جابه‌جایی وجود ندارد.", type="warning", position="top")
+            return
+        current_id = conversation_id
+        current_conv = find_conversation(current_id)
+        heading.text = current_conv.get("title", "گفت‌وگوی جدید") if current_conv else "گفت‌وگوی جدید"
+        render_history()
+        render_messages()
 
-    def copy_to_clipboard(text: str):
-        ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(text)})")
-        ui.notify("کپی شد!", type="positive", position="top")
+    def new_conversation() -> None:
+        nonlocal current_id, current_conv
+        if generating:
+            return
+        current_id = None
+        current_conv = None
+        heading.text = "گفت‌وگوی جدید"
+        render_history()
+        render_messages()
 
-    # --- Model loading ---
-    def load_model_action(checkpoint_key: str):
-        if state.is_generating:
-            ui.notify("در حال تولید پاسخ است. صبر کنید.", type="warning", position="top")
+    def delete_conversation(conversation_id: str) -> None:
+        nonlocal current_id, current_conv
+        if generating:
+            return
+        conversations[:] = [item for item in conversations if item.get("id") != conversation_id]
+        save_conversations(conversations)
+        if current_id == conversation_id:
+            current_id = None
+            current_conv = None
+            heading.text = "گفت‌وگوی جدید"
+        render_history()
+        render_messages()
+
+    def load_selected_model(event) -> None:
+        key = event.value
+        if not key or generating:
             return
         try:
-            meta = engine.load(checkpoint_key)
-            ui.notify(
-                f"مدل بارگذاری شد: {meta['checkpoint_label']} "
-                f"({meta['params']:,} پارامتر)",
-                type="positive", position="top",
-            )
-            render_status_badge()
-            render_messages()
-        except ModelLoadError as e:
-            ui.notify(str(e), type="negative", position="top", multi_line=True)
-            render_status_badge()
+            metadata = engine.load(key)
+            header_status.text = f"● آماده · {metadata['checkpoint_label']}"
+            ui.notify("مدل محلی بارگذاری شد.", type="positive", position="top")
+        except ModelLoadError as error:
+            header_status.text = "● خطا در بارگذاری مدل"
+            ui.notify(str(error), type="negative", position="top", multi_line=True)
+        render_model_choices()
 
-    # --- Send message ---
-    def send_message():
-        if state.is_generating:
+    def send_message() -> None:
+        nonlocal current_id, current_conv, generating, worker
+        if generating:
             return
-        text = text_input.value.strip()
+        text = (text_input.value or "").strip()
         if not text:
             return
         if not engine.is_loaded:
-            ui.notify("ابتدا یک مدل را بارگذاری کنید.", type="warning", position="top")
+            ui.notify("ابتدا یک checkpoint محلی را انتخاب کنید.", type="warning", position="top")
             return
-
-        # Create conversation if none active
-        nonlocal current_conv
         if current_conv is None:
-            import uuid
-            current_conv = {
-                "id": str(uuid.uuid4())[:8],
-                "title": text[:40] + ("..." if len(text) > 40 else ""),
-                "messages": [],
-                "created": time.strftime("%Y-%m-%d %H:%M"),
-            }
-            state.conversations.insert(0, current_conv)
-            state.current_conv_id = current_conv["id"]
-            title_label.text = current_conv["title"]
-
-        # Add user message
+            current_conv = {"id": uuid.uuid4().hex[:8], "title": text[:42], "messages": [], "created": time.strftime("%Y-%m-%d %H:%M")}
+            current_id = current_conv["id"]
+            conversations.insert(0, current_conv)
+            heading.text = current_conv["title"]
         current_conv["messages"].append({"role": "user", "content": text})
-        save_conversations(state.conversations)
+        model_message = {"role": "model", "content": ""}
+        current_conv["messages"].append(model_message)
+        save_conversations(conversations)
         text_input.value = ""
-
-        # Add placeholder model message
-        model_msg = {"role": "model", "content": ""}
-        current_conv["messages"].append(model_msg)
-
+        text_input.update()
+        render_history()
         render_messages()
-        render_sidebar_history(history_container)
+        generating = True
+        send_button.set_visibility(False)
+        stop_button.set_visibility(True)
+        header_status.text = "● در حال تولید پاسخ..."
 
-        # Start generation thread
-        state.is_generating = True
-        send_btn.set_visibility(False)
-        stop_btn.set_visibility(True)
-        render_status_badge()
+        def generate() -> None:
+            for event in engine.generate_stream(text, max_new_tokens=120, temperature=0.35, top_k=20):
+                events.put(event)
 
-        def generation_worker():
-            full_response = ""
+        worker = threading.Thread(target=generate, daemon=True)
+        worker.start()
+
+    def stop_generation() -> None:
+        if generating:
+            engine.stop()
+            ui.notify("درخواست توقف ارسال شد.", type="warning", position="top")
+
+    def poll_generation() -> None:
+        nonlocal generating
+        changed = False
+        while True:
             try:
-                for event in engine.generate_stream(
-                    prompt=text,
-                    max_new_tokens=engine.config.max_new_tokens if engine.config else 200,
-                    temperature=engine.config.temperature if engine.config else 0.7,
-                    top_k=engine.config.top_k if engine.config else 40,
-                ):
-                    if event["type"] == "token":
-                        full_response += event["text"]
-                        model_msg["content"] = full_response
-                        # Update UI — re-render just the last message
-                        ui.update(messages_container)
+                event = events.get_nowait()
+            except queue.Empty:
+                break
+            changed = True
+            if current_conv is None:
+                continue
+            target = current_conv["messages"][-1]
+            event_type = event.get("type")
+            if event_type in {"token", "done", "stopped"}:
+                target["content"] = event.get("text", "")
+                if event_type == "stopped":
+                    target["content"] += "\n\n[تولید متوقف شد]"
+                if event_type in {"done", "stopped"}:
+                    generating = False
+                    save_conversations(conversations)
+            elif event_type == "error":
+                target["role"] = "error"
+                target["content"] = event.get("text", "خطای نامشخص")
+                generating = False
+                save_conversations(conversations)
+        if changed:
+            render_messages()
+            if not generating:
+                send_button.set_visibility(True)
+                stop_button.set_visibility(False)
+                header_status.text = "● آماده"
 
-                    elif event["type"] == "done":
-                        full_response = event["text"]
-                        # Strip the prompt prefix from the response
-                        if full_response.startswith(text):
-                            full_response = full_response[len(text):]
-                        model_msg["content"] = full_response
-                        save_conversations(state.conversations)
+    new_button.on("click", new_conversation)
+    send_button.on("click", send_message)
+    stop_button.on("click", stop_generation)
+    model_select.on_value_change(load_selected_model)
+    text_input.on("keydown.enter", lambda event: send_message() if not event.args.get("shiftKey", False) else None)
+    ui.timer(0.08, poll_generation)
 
-                    elif event["type"] == "stopped":
-                        full_response = event["text"]
-                        if full_response.startswith(text):
-                            full_response = full_response[len(text):]
-                        model_msg["content"] = full_response + "\n\n [تولید متوقف شد]"
-                        save_conversations(state.conversations)
-
-                    elif event["type"] == "error":
-                        model_msg["role"] = "error"
-                        model_msg["content"] = event["text"]
-                        save_conversations(state.conversations)
-
-            except Exception as e:
-                model_msg["role"] = "error"
-                model_msg["content"] = f"خطای غیرمنتظره: {e}"
-                save_conversations(state.conversations)
-            finally:
-                state.is_generating = False
-                send_btn.set_visibility(True)
-                stop_btn.set_visibility(False)
-                render_status_badge()
-                render_messages()
-
-        state.gen_thread = threading.Thread(target=generation_worker, daemon=True)
-        state.gen_thread.start()
-
-    def stop_generation():
-        engine.stop()
-        ui.notify("در حال توقف...", type="warning", position="top")
-
-    # --- Bindings ---
-    send_btn.on("click", send_message)
-    stop_btn.on("click", stop_generation)
-
-    # Enter to send, Shift+Enter for newline
-    text_input.on("keydown.enter", lambda e: send_message() if not e.args.get("shiftKey") else None)
-
-    # --- Initial render ---
-    render_status_badge()
+    initial = conversations[0] if conversations else None
+    if initial:
+        current_id = initial.get("id")
+        current_conv = initial
+        heading.text = initial.get("title", "گفت‌وگوی جدید")
+    render_history()
+    render_model_choices()
     render_messages()
-    render_sidebar_history(history_container)
+    header_status.text = "● مدل بارگذاری نشده"
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    print("=" * 60)
-    print("  Chat Interface for Custom LLM")
-    print(f"  Port: {CHAT_PORT}")
-    print(f"  Model checkpoints dir: {os.path.join(os.path.dirname(__file__), 'checkpoints')}")
-    print("=" * 60)
-    print()
-    print("Available checkpoints:")
-    for ckpt in engine.list_available():
-        status = "READY" if ckpt["available"] else "NOT FOUND"
-        print(f"  [{status}] {ckpt['label']}")
-        print(f"           Model: {ckpt['model_path']}")
-        print(f"           Tokenizer: {ckpt['tokenizer_path']}")
-    print()
-    print(f"Open http://localhost:{CHAT_PORT} in your browser.")
-    print()
-
+if __name__ in {"__main__", "__mp_main__"}:
     ui.run(host="0.0.0.0", port=CHAT_PORT, title="دستیار هوش مصنوعی", reload=False, show=False)

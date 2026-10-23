@@ -1,21 +1,19 @@
-"""Chat model engine: loads the real trained model and tokenizer, provides
-token-by-token streaming generation with stop control and error handling.
-
-This module is independent of training code. It only reads checkpoints and
-tokenizer files — it never modifies them.
-"""
+"""Inference-only engine for the project's local GPT checkpoints."""
 
 import os
 import sys
 import threading
+from collections.abc import Iterator
+
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from checkpoint import CheckpointError, load_checkpoint, load_config_from_checkpoint
 from config import ModelConfig
 from model import GPTModel
 from tokenizer import BPETokenizer
-from checkpoint import load_checkpoint, load_config_from_checkpoint, CheckpointError
 
 
 CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), "checkpoints")
@@ -24,7 +22,7 @@ AVAILABLE_CHECKPOINTS = {
     "specialized_best": {
         "model": os.path.join(CHECKPOINT_DIR, "specialized_best.pt"),
         "tokenizer": os.path.join(CHECKPOINT_DIR, "tokenizer_v2.json"),
-        "label": "مدل تخصصی (بهترین)",
+        "label": "مدل تخصصی، بهترین checkpoint",
     },
     "specialized": {
         "model": os.path.join(CHECKPOINT_DIR, "specialized.pt"),
@@ -34,109 +32,88 @@ AVAILABLE_CHECKPOINTS = {
     "phase1": {
         "model": os.path.join(CHECKPOINT_DIR, "model.pt"),
         "tokenizer": os.path.join(CHECKPOINT_DIR, "tokenizer.json"),
-        "label": "مدل پایه (فاز ۱)",
+        "label": "مدل پایه، فاز اول",
     },
 }
 
 
 class ModelLoadError(Exception):
-    pass
+    """Raised when a checkpoint cannot be used safely."""
 
 
 class ChatModelEngine:
-    """Loads a trained model + tokenizer and generates text token-by-token.
+    """Load local weights and generate only model continuation text."""
 
-    Generation runs on a background thread so the UI stays responsive.
-    A stop flag allows safe interruption mid-generation.
-    """
-
-    def __init__(self):
+    def __init__(self) -> None:
         self.model: GPTModel | None = None
         self.tokenizer: BPETokenizer | None = None
         self.config: ModelConfig | None = None
         self.checkpoint_name: str | None = None
         self._stop_flag = threading.Event()
-        self._lock = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._generation_lock = threading.Lock()
         self._loaded = False
 
     @property
     def is_loaded(self) -> bool:
-        return self._loaded
+        with self._state_lock:
+            return self._loaded
 
     def list_available(self) -> list[dict]:
-        """Return list of checkpoints that exist on disk with their status."""
         results = []
         for key, info in AVAILABLE_CHECKPOINTS.items():
-            model_exists = os.path.exists(info["model"])
-            tok_exists = os.path.exists(info["tokenizer"])
+            model_exists = os.path.isfile(info["model"])
+            tokenizer_exists = os.path.isfile(info["tokenizer"])
             results.append({
                 "key": key,
                 "label": info["label"],
                 "model_path": info["model"],
                 "tokenizer_path": info["tokenizer"],
                 "model_exists": model_exists,
-                "tokenizer_exists": tok_exists,
-                "available": model_exists and tok_exists,
+                "tokenizer_exists": tokenizer_exists,
+                "available": model_exists and tokenizer_exists,
             })
         return results
 
     def load(self, checkpoint_key: str = "specialized_best") -> dict:
-        """Load model and tokenizer from checkpoint files.
-
-        Returns metadata dict with step, val_loss, params count.
-        Raises ModelLoadError on any failure.
-        """
         if checkpoint_key not in AVAILABLE_CHECKPOINTS:
-            raise ModelLoadError(f"چک‌پوینت ناشناخته: {checkpoint_key}")
+            raise ModelLoadError(f"چک‌پوینت ناشناخته است: {checkpoint_key}")
 
         info = AVAILABLE_CHECKPOINTS[checkpoint_key]
-        ckpt_path = info["model"]
-        tok_path = info["tokenizer"]
-
-        if not os.path.exists(ckpt_path):
-            raise ModelLoadError(
-                f"فایل چک‌پوینت پیدا نشد: {ckpt_path}\n"
-                f"ابتدا مدل را آموزش دهید."
-            )
-        if not os.path.exists(tok_path):
-            raise ModelLoadError(
-                f"فایل توکنایزر پیدا نشد: {tok_path}\n"
-                f"ابتدا مدل را آموزش دهید."
-            )
+        if not os.path.isfile(info["model"]):
+            raise ModelLoadError(f"فایل وزن مدل پیدا نشد: {info['model']}")
+        if not os.path.isfile(info["tokenizer"]):
+            raise ModelLoadError(f"فایل توکنایزر پیدا نشد: {info['tokenizer']}")
 
         try:
-            saved_config = load_config_from_checkpoint(ckpt_path)
-        except CheckpointError as e:
-            raise ModelLoadError(f"خطا در خواندن تنظیمات چک‌پوینت: {e}") from e
+            saved_config = load_config_from_checkpoint(info["model"])
+        except CheckpointError as error:
+            raise ModelLoadError(f"خواندن تنظیمات checkpoint ناموفق بود: {error}") from error
 
         if saved_config is None:
-            raise ModelLoadError(
-                "چک‌پوینت فاقد تنظیمات است. نمی‌توان مدل را بارگذاری کرد."
-            )
+            raise ModelLoadError("checkpoint تنظیمات معماری ندارد و قابل استفاده نیست.")
 
         tokenizer = BPETokenizer(vocab_size=saved_config.vocab_size)
         try:
-            tokenizer.load(tok_path)
-        except Exception as e:
-            raise ModelLoadError(f"خطا در بارگذاری توکنایزر: {e}") from e
+            tokenizer.load(info["tokenizer"])
+        except Exception as error:
+            raise ModelLoadError(f"بارگذاری توکنایزر ناموفق بود: {error}") from error
 
         if tokenizer.vocab_size != saved_config.vocab_size:
             raise ModelLoadError(
-                f"عدم تطابق اندازه واژگان: توکنایزر={tokenizer.vocab_size}, "
-                f"چک‌پوینت={saved_config.vocab_size}"
+                "تعداد توکن‌ها سازگار نیست: "
+                f"tokenizer={tokenizer.vocab_size}, checkpoint={saved_config.vocab_size}"
             )
-
-        saved_config.vocab_size = tokenizer.vocab_size
 
         model = GPTModel(saved_config)
         try:
-            meta = load_checkpoint(ckpt_path, model)
-        except CheckpointError as e:
-            raise ModelLoadError(f"خطا در بارگذاری وزن‌های مدل: {e}") from e
+            metadata = load_checkpoint(info["model"], model)
+        except CheckpointError as error:
+            raise ModelLoadError(f"بارگذاری وزن‌های مدل ناموفق بود: {error}") from error
 
+        model.to("cpu")
         model.eval()
-
-        with self._lock:
+        with self._state_lock:
             self.model = model
             self.tokenizer = tokenizer
             self.config = saved_config
@@ -144,139 +121,112 @@ class ChatModelEngine:
             self._loaded = True
 
         return {
-            "step": meta.get("step", 0),
-            "val_loss": meta.get("val_loss", 0.0),
+            "step": metadata.get("step", 0),
+            "val_loss": metadata.get("val_loss", 0.0),
             "params": model.count_parameters(),
             "vocab_size": tokenizer.vocab_size,
             "context_length": saved_config.context_length,
             "n_layers": saved_config.n_layers,
             "hidden_dim": saved_config.hidden_dim,
-            "checkpoint_label": AVAILABLE_CHECKPOINTS[checkpoint_key]["label"],
+            "checkpoint_label": info["label"],
         }
 
-    def unload(self):
-        with self._lock:
-            self.model = None
-            self.tokenizer = None
-            self.config = None
-            self.checkpoint_name = None
-            self._loaded = False
-
-    def stop(self):
-        """Request the running generation to stop at the next token."""
+    def stop(self) -> None:
         self._stop_flag.set()
-
-    def _is_stopped(self) -> bool:
-        return self._stop_flag.is_set()
 
     def generate_stream(
         self,
         prompt: str,
-        max_new_tokens: int = 200,
-        temperature: float = 0.7,
-        top_k: int = 40,
-    ):
-        """Generator that yields text chunks token-by-token.
-
-        Yields dicts:
-            {"type": "token", "text": "..."}  — a decoded chunk
-            {"type": "done", "text": "..."}   — full text at the end
-            {"type": "error", "text": "..."}  — error message
-            {"type": "stopped", "text": "..."} — generation was stopped
-
-        The caller is responsible for UI updates on each yield.
-        """
-        self._stop_flag.clear()
-
-        with self._lock:
-            if not self._loaded or self.model is None or self.tokenizer is None:
-                yield {"type": "error", "text": "مدل بارگذاری نشده است."}
-                return
-            model = self.model
-            tokenizer = self.tokenizer
-            config = self.config
-
+        max_new_tokens: int = 120,
+        temperature: float = 0.35,
+        top_k: int = 20,
+        repetition_penalty: float = 1.08,
+    ) -> Iterator[dict]:
+        """Yield continuation chunks; the prompt is never included in output."""
         if not prompt.strip():
             yield {"type": "error", "text": "پیام خالی است."}
             return
 
-        try:
-            ids = tokenizer.encode(prompt)
-        except Exception as e:
-            yield {"type": "error", "text": f"خطا در رمزگذاری متن: {e}"}
+        with self._state_lock:
+            model = self.model
+            tokenizer = self.tokenizer
+            config = self.config
+            loaded = self._loaded
+
+        if not loaded or model is None or tokenizer is None or config is None:
+            yield {"type": "error", "text": "مدل بارگذاری نشده است."}
+            return
+        if not self._generation_lock.acquire(blocking=False):
+            yield {"type": "error", "text": "مدل در حال پاسخ‌گویی به درخواست دیگری است."}
             return
 
-        if len(ids) == 0:
-            ids = [0]
-
-        max_ctx = config.context_length
-        if len(ids) > max_ctx:
-            ids = ids[-max_ctx:]
-
-        idx = torch.tensor([ids], dtype=torch.long, device="cpu")
-
-        temp = max(temperature, 1e-8)
-        k = top_k if top_k is not None and top_k > 0 else config.top_k
-        max_new = max_new_tokens or config.max_new_tokens
-
-        generated_ids = list(ids)
-        full_text_parts = []
-        import torch.nn.functional as F
-
+        self._stop_flag.clear()
         try:
-            with torch.no_grad():
-                for _ in range(max_new):
-                    if self._is_stopped():
-                        full = prompt + "".join(full_text_parts)
-                        yield {"type": "stopped", "text": full}
+            try:
+                prompt_ids = tokenizer.encode(prompt)
+            except Exception as error:
+                yield {"type": "error", "text": f"رمزگذاری پیام ناموفق بود: {error}"}
+                return
+
+            if not prompt_ids:
+                prompt_ids = [0]
+            prompt_ids = prompt_ids[-config.context_length:]
+            idx = torch.tensor([prompt_ids], dtype=torch.long, device="cpu")
+            generated_ids: list[int] = []
+            previous_text = ""
+            temperature_value = max(float(temperature), 0.05)
+            token_limit = max(1, min(int(max_new_tokens), 256))
+            top_k_value = max(1, min(int(top_k), config.vocab_size))
+
+            with torch.inference_mode():
+                for _ in range(token_limit):
+                    if self._stop_flag.is_set():
+                        yield {"type": "stopped", "text": previous_text}
                         return
 
-                    idx_cond = idx if idx.size(1) <= max_ctx else idx[:, -max_ctx:]
-                    logits, _ = model(idx_cond)
-                    logits = logits[:, -1, :] / temp
+                    context = idx[:, -config.context_length:]
+                    logits, _ = model(context)
+                    next_logits = logits[:, -1, :] / temperature_value
 
-                    if k is not None and k > 0:
-                        v, _ = torch.topk(logits, min(k, logits.size(-1)))
-                        logits[logits < v[:, [-1]]] = float('-inf')
+                    if repetition_penalty > 1.0 and generated_ids:
+                        used_ids = torch.tensor(generated_ids, dtype=torch.long)
+                        used_logits = next_logits[0, used_ids]
+                        next_logits[0, used_ids] = torch.where(
+                            used_logits < 0,
+                            used_logits * repetition_penalty,
+                            used_logits / repetition_penalty,
+                        )
 
-                    probs = F.softmax(logits, dim=-1)
-                    next_token = torch.multinomial(probs, num_samples=1)
+                    values, _ = torch.topk(next_logits, top_k_value)
+                    next_logits[next_logits < values[:, [-1]]] = float("-inf")
+                    probabilities = F.softmax(next_logits, dim=-1)
+                    next_token = torch.multinomial(probabilities, num_samples=1)
                     idx = torch.cat([idx, next_token], dim=1)
+                    generated_ids.append(int(next_token.item()))
 
-                    next_id = next_token[0].item()
-                    generated_ids.append(next_id)
+                    current_text = tokenizer.decode(generated_ids)
+                    chunk = current_text[len(previous_text):]
+                    if chunk:
+                        previous_text = current_text
+                        yield {"type": "token", "text": chunk}
 
-                    # Decode incrementally — decode full sequence and diff
-                    new_text = tokenizer.decode(generated_ids)
-                    if new_text:
-                        prev_len = len(prompt) + sum(len(p) for p in full_text_parts)
-                        chunk = new_text[prev_len:]
-                        if chunk:
-                            full_text_parts.append(chunk)
-                            yield {"type": "token", "text": chunk}
-
-        except RuntimeError as e:
-            yield {"type": "error", "text": f"خطا در تولید متن: {e}"}
-            return
-        except Exception as e:
-            yield {"type": "error", "text": f"خطای غیرمنتظره: {e}"}
-            return
-
-        full = prompt + "".join(full_text_parts)
-        yield {"type": "done", "text": full}
+            yield {"type": "done", "text": previous_text}
+        except RuntimeError as error:
+            yield {"type": "error", "text": f"خطای تولید متن: {error}"}
+        except Exception as error:
+            yield {"type": "error", "text": f"خطای غیرمنتظره: {error}"}
+        finally:
+            self._generation_lock.release()
 
     def get_status(self) -> dict:
-        """Return current model status for UI display."""
-        if not self._loaded:
-            return {"loaded": False, "available": self.list_available()}
-        with self._lock:
+        with self._state_lock:
+            if not self._loaded or self.model is None or self.tokenizer is None or self.config is None:
+                return {"loaded": False, "available": self.list_available()}
             return {
                 "loaded": True,
                 "checkpoint": self.checkpoint_name,
-                "label": AVAILABLE_CHECKPOINTS.get(
-                    self.checkpoint_name, {}
-                ).get("label", ""),
-                "vocab_size": self.tokenizer.vocab_size if self.tokenizer else 0,
-                "context_length": self.config.context_length if self.config else 0,
-                "params": self.model.count_parameters() if self.model else 0,
+                "label": AVAILABLE_CHECKPOINTS[self.checkpoint_name]["label"],
+                "vocab_size": self.tokenizer.vocab_size,
+                "context_length": self.config.context_length,
+                "params": self.model.count_parameters(),
             }
