@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -108,8 +109,10 @@ def get_specialized_config() -> ModelConfig:
         eval_iters=10,
         learning_rate=1e-3,
         weight_decay=0.1,
+        dropout=0.1,
         warmup_steps=10,
         grad_clip=1.0,
+        early_stopping_patience=5,
         checkpoint_dir=CHECKPOINT_DIR,
         temperature=0.7,
         top_k=40,
@@ -160,18 +163,55 @@ def prepare_data(config: ModelConfig) -> dict:
     val_texts = [d.text for d in val_docs]
     test_texts = [d.text for d in test_docs]
 
-    # Train tokenizer on training set only (no leakage from val/test)
-    print("\n[3/5] Training BPE tokenizer on training corpus...")
-    try:
-        tokenizer = adapt_tokenizer(
-            old_tokenizer_path=EXISTING_TOK if os.path.exists(EXISTING_TOK) else None,
-            train_texts=train_texts,
-            target_vocab_size=config.bpe_vocab_size,
-            output_path=NEW_TOKENIZER,
-            verbose=True,
-        )
-    except AdaptationError as e:
-        raise RuntimeError(f"Tokenizer training failed: {e}") from e
+    # Train or load tokenizer (cache only if training data hash matches)
+    print("\n[3/5] Preparing BPE tokenizer...")
+    train_data_hash = hashlib.md5(
+        "".join(train_texts).encode("utf-8")
+    ).hexdigest()
+    tokenizer_meta_path = NEW_TOKENIZER + ".meta.json"
+    tokenizer = None
+    if os.path.exists(NEW_TOKENIZER) and os.path.exists(tokenizer_meta_path):
+        try:
+            with open(tokenizer_meta_path, "r") as f:
+                meta = json.load(f)
+            if meta.get("train_data_hash") == train_data_hash and \
+               meta.get("target_vocab_size") == config.bpe_vocab_size:
+                cached = BPETokenizer(vocab_size=config.bpe_vocab_size)
+                cached.load(NEW_TOKENIZER)
+                if cached.vocab_size == meta.get("actual_vocab_size"):
+                    print(f"  Reusing cached tokenizer from {NEW_TOKENIZER} "
+                          f"(vocab={cached.vocab_size}, hash={train_data_hash[:8]})")
+                    tokenizer = cached
+                else:
+                    print(f"  Cached tokenizer vocab mismatch, retraining...")
+            else:
+                print(f"  Training data changed (hash differs), retraining tokenizer...")
+        except Exception as e:
+            print(f"  Could not load cached tokenizer ({e}), retraining...")
+
+    if tokenizer is None:
+        print("  Training new BPE tokenizer on training corpus...")
+        try:
+            tokenizer = adapt_tokenizer(
+                old_tokenizer_path=EXISTING_TOK if os.path.exists(EXISTING_TOK) else None,
+                train_texts=train_texts,
+                target_vocab_size=config.bpe_vocab_size,
+                output_path=NEW_TOKENIZER,
+                verbose=True,
+            )
+        except AdaptationError as e:
+            raise RuntimeError(f"Tokenizer training failed: {e}") from e
+        # Save metadata for future cache validation
+        tok_meta = {
+            "train_data_hash": train_data_hash,
+            "target_vocab_size": config.bpe_vocab_size,
+            "actual_vocab_size": tokenizer.vocab_size,
+        }
+        try:
+            with open(tokenizer_meta_path, "w") as f:
+                json.dump(tok_meta, f)
+        except Exception:
+            pass
 
     actual_vocab = tokenizer.vocab_size
     config.vocab_size = actual_vocab
@@ -217,6 +257,22 @@ def prepare_data(config: ModelConfig) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Optimizer with proper weight decay groups
+# ---------------------------------------------------------------------------
+
+def _create_optimizer(model: GPTModel, config: ModelConfig) -> torch.optim.AdamW:
+    """Create AdamW with weight decay only on weight matrices (dim >= 2),
+    not on biases or LayerNorm parameters."""
+    decay_params = [p for n, p in model.named_parameters() if p.dim() >= 2]
+    nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2]
+    optim_groups = [
+        {"params": decay_params, "weight_decay": config.weight_decay},
+        {"params": nodecay_params, "weight_decay": 0.0},
+    ]
+    return torch.optim.AdamW(optim_groups, lr=config.learning_rate, betas=(0.9, 0.95))
+
+
+# ---------------------------------------------------------------------------
 # Training helpers
 # ---------------------------------------------------------------------------
 
@@ -236,14 +292,21 @@ def evaluate_model(model, loader, device="cpu", max_iters=20) -> float:
     return total_loss / max(count, 1)
 
 
-def get_lr(step, config):
-    """Linear warmup then cosine decay."""
+def get_lr(step, config, total_train_tokens=None):
+    """Linear warmup then cosine decay over estimated total steps.
+
+    Minimum LR is 10% of base — never reaches zero so training can still
+    make small adjustments near the end.
+    """
     import math
     if step < config.warmup_steps:
         return config.learning_rate * (step + 1) / config.warmup_steps
-    return config.learning_rate * 0.5 * (1 + math.cos(
-        math.pi * min(step / (config.max_epochs * 500), 1.0)
-    ))
+    token_count = total_train_tokens if total_train_tokens is not None else 14568
+    est_steps_per_epoch = max(1, token_count // config.batch_size)
+    total_steps = max(1, est_steps_per_epoch * config.max_epochs)
+    progress = min((step - config.warmup_steps) / max(total_steps - config.warmup_steps, 1), 1.0)
+    min_lr = config.learning_rate * 0.1
+    return min_lr + (config.learning_rate - min_lr) * 0.5 * (1 + math.cos(math.pi * progress))
 
 
 # ---------------------------------------------------------------------------
@@ -263,10 +326,7 @@ def setup_model_from_phase1(config: ModelConfig, actual_vocab: int) -> tuple:
         print(f"  WARNING: could not read Phase 1 config: {e}")
         print(f"  Training from scratch instead.")
         model = GPTModel(config)
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
-            weight_decay=config.weight_decay,
-        )
+        optimizer = _create_optimizer(model, config)
         return model, optimizer, 0, 0, float('inf')
 
     old_vocab = phase1_config.vocab_size
@@ -289,10 +349,7 @@ def setup_model_from_phase1(config: ModelConfig, actual_vocab: int) -> tuple:
         print(f"  Cannot transfer weights — training from scratch.")
         print(f"  Phase 1 checkpoint preserved at {EXISTING_CKPT}")
         model = GPTModel(config)
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
-            weight_decay=config.weight_decay,
-        )
+        optimizer = _create_optimizer(model, config)
         return model, optimizer, 0, 0, float('inf')
 
     # Architecture matches — load weights into a model with the old config
@@ -305,10 +362,7 @@ def setup_model_from_phase1(config: ModelConfig, actual_vocab: int) -> tuple:
         print(f"  ERROR: could not load Phase 1 weights: {e}")
         print(f"  Training from scratch instead. Phase 1 checkpoint preserved.")
         model = GPTModel(config)
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
-            weight_decay=config.weight_decay,
-        )
+        optimizer = _create_optimizer(model, config)
         return model, optimizer, 0, 0, float('inf')
 
     print(f"  Phase 1 loaded: step={meta['step']}, val_loss={meta['val_loss']:.4f}")
@@ -321,10 +375,7 @@ def setup_model_from_phase1(config: ModelConfig, actual_vocab: int) -> tuple:
         print(f"  ERROR: embedding adaptation failed: {e}")
         print(f"  Training from scratch instead. Phase 1 checkpoint preserved.")
         model = GPTModel(config)
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
-            weight_decay=config.weight_decay,
-        )
+        optimizer = _create_optimizer(model, config)
         return model, optimizer, 0, 0, float('inf')
 
     # Adapt position embeddings if context length changed
@@ -334,20 +385,14 @@ def setup_model_from_phase1(config: ModelConfig, actual_vocab: int) -> tuple:
         print(f"  ERROR: position embedding adaptation failed: {e}")
         print(f"  Training from scratch instead. Phase 1 checkpoint preserved.")
         model = GPTModel(config)
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
-            weight_decay=config.weight_decay,
-        )
+        optimizer = _create_optimizer(model, config)
         return model, optimizer, 0, 0, float('inf')
 
     # Update model's internal config to match adapted dimensions
     model.config = config
 
     # Create fresh optimizer (adapted params are new)
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
-        weight_decay=config.weight_decay,
-    )
+    optimizer = _create_optimizer(model, config)
     return model, optimizer, 0, 0, float('inf')
 
 
@@ -375,10 +420,7 @@ def setup_model_from_specialized(
     # Build model with saved config for loading
     model = GPTModel(saved_config)
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
-        weight_decay=config.weight_decay,
-    )
+    optimizer = _create_optimizer(model, config)
 
     meta = load_checkpoint(SPECIALIZED_CKPT, model, optimizer)
 
@@ -459,10 +501,7 @@ def run_training(config: ModelConfig, resume: bool = False):
         else:
             print("\n  No existing checkpoint found, training from scratch...")
             model = GPTModel(config)
-            optimizer = torch.optim.AdamW(
-                model.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
-                weight_decay=config.weight_decay,
-            )
+            optimizer = _create_optimizer(model, config)
     except CheckpointError as e:
         print(f"\nFATAL: Checkpoint error: {e}")
         print(f"  Existing checkpoints are preserved. Fix the issue and retry.")
@@ -500,6 +539,10 @@ def run_training(config: ModelConfig, resume: bool = False):
     start_time = time.time()
     last_train_loss = 0.0
     last_val_loss = 0.0
+    train_loss_sum = 0.0
+    train_loss_count = 0
+    epochs_no_improve = 0
+    stopped_early = False
 
     try:
         for ep in range(epoch, config.max_epochs):
@@ -512,7 +555,7 @@ def run_training(config: ModelConfig, resume: bool = False):
                     break
 
                 # LR schedule
-                lr = get_lr(step, config)
+                lr = get_lr(step, config, total_train_tokens=len(data["train_ids"]))
                 for pg in optimizer.param_groups:
                     pg["lr"] = lr
 
@@ -526,13 +569,17 @@ def run_training(config: ModelConfig, resume: bool = False):
 
                 optimizer.step()
                 step += 1
+                train_loss_sum += loss.item()
+                train_loss_count += 1
 
                 # Periodic eval
                 if step % config.eval_interval == 0:
                     val_loss = evaluate_model(
                         model, val_loader, max_iters=config.eval_iters
                     )
-                    train_loss = loss.item()
+                    train_loss = train_loss_sum / max(train_loss_count, 1)
+                    train_loss_sum = 0.0
+                    train_loss_count = 0
                     last_train_loss = train_loss
                     last_val_loss = val_loss
                     elapsed = time.time() - start_time
@@ -557,14 +604,23 @@ def run_training(config: ModelConfig, resume: bool = False):
                     # Save best checkpoint (atomic)
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
+                        epochs_no_improve = 0
                         save_checkpoint(
                             BEST_CKPT, model, optimizer, step, ep,
                             train_loss, val_loss, config=config,
                         )
                         print(f"    -> New best val_loss: {val_loss:.4f} (saved)")
+                    else:
+                        epochs_no_improve += 1
+                        if epochs_no_improve >= config.early_stopping_patience:
+                            print(f"\n  [EARLY STOP] No val_loss improvement for "
+                                  f"{config.early_stopping_patience} evals. "
+                                  f"Stopping at step {step}.")
+                            stopped_early = True
+                            break
 
-            # Check if we broke out of inner loop due to shutdown
-            if _shutdown_requested:
+            # Check if we broke out of inner loop
+            if _shutdown_requested or stopped_early:
                 break
 
             # End of epoch eval
@@ -582,7 +638,7 @@ def run_training(config: ModelConfig, resume: bool = False):
                     last_train_loss, epoch_val_loss, config=config,
                 )
 
-        # Save final checkpoint (unless we were shut down — already saved above)
+        # Save final checkpoint (unless we were shut down or early-stopped)
         if not _shutdown_requested:
             save_checkpoint(
                 SPECIALIZED_CKPT, model, optimizer, step, config.max_epochs,
@@ -627,6 +683,7 @@ def run_training(config: ModelConfig, resume: bool = False):
             "final_val_loss": last_val_loss,
             "total_time_s": round(time.time() - start_time, 1),
             "interrupted": _shutdown_requested,
+            "early_stopped": stopped_early,
         },
         "log_entries": log_entries,
     }
@@ -641,7 +698,12 @@ def run_training(config: ModelConfig, resume: bool = False):
             os.remove(tmp_log)
         raise
 
-    status = "INTERRUPTED" if _shutdown_requested else "complete"
+    if _shutdown_requested:
+        status = "INTERRUPTED"
+    elif stopped_early:
+        status = "EARLY STOPPED"
+    else:
+        status = "complete"
     print(f"\n{'=' * 70}")
     print(f"Training {status}!")
     print(f"  Total steps: {step}")

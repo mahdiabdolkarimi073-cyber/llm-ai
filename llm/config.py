@@ -19,12 +19,14 @@ class ModelConfig:
     # Training
     learning_rate: float = 3e-4
     weight_decay: float = 0.1
+    dropout: float = 0.1
     batch_size: int = 32
     grad_clip: float = 1.0
     max_epochs: int = 50
     eval_interval: int = 100
     eval_iters: int = 20
     warmup_steps: int = 100
+    early_stopping_patience: int = 5
 
     # Tokenizer
     bpe_vocab_size: int = 8000

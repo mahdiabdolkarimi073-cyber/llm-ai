@@ -29,8 +29,8 @@ class CausalSelfAttention(nn.Module):
 
         self.qkv_proj = nn.Linear(config.hidden_dim, 3 * config.hidden_dim, bias=False)
         self.out_proj = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
-        self.attn_dropout = nn.Dropout(0.0)
-        self.resid_dropout = nn.Dropout(0.0)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape  # batch, seq_len, hidden_dim
@@ -71,7 +71,7 @@ class FeedForward(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(config.hidden_dim, config.ff_dim, bias=False)
         self.fc2 = nn.Linear(config.ff_dim, config.hidden_dim, bias=False)
-        self.dropout = nn.Dropout(0.0)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)
