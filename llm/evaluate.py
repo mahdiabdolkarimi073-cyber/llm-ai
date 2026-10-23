@@ -103,7 +103,7 @@ def load_model_and_tokenizer():
         saved_config = ModelConfig()
 
     # Load tokenizer
-    tokenizer = BPETokenizer(vocab_size=saved_config.bpe_vocab_size)
+    tokenizer = BPETokenizer(vocab_size=saved_config.vocab_size)
     tokenizer.load(tok_path)
 
     # Validate vocab compatibility
@@ -114,8 +114,6 @@ def load_model_and_tokenizer():
         print(f"  Checkpoint: {ckpt_path}")
         print(f"  Retrain with: python llm/train_specialized.py")
         sys.exit(1)
-
-    saved_config.vocab_size = tokenizer.vocab_size
 
     # Load model
     model = GPTModel(saved_config)

@@ -119,7 +119,7 @@ def run_generate():
         config = saved_config
 
     # Load tokenizer
-    tokenizer = BPETokenizer(vocab_size=config.bpe_vocab_size)
+    tokenizer = BPETokenizer(vocab_size=config.vocab_size)
     tokenizer.load(tok_path)
 
     # Validate vocab compatibility

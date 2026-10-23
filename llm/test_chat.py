@@ -179,7 +179,7 @@ def test_checkpoint_files_preserved():
     # The chat module only reads, never writes to checkpoints
     # Verify chat_model.py doesn't import any save function
     chat_model_path = os.path.join(os.path.dirname(__file__), "chat_model.py")
-    with open(chat_model_path, "r") as f:
+    with open(chat_model_path, "r", encoding="utf-8") as f:
         content = f.read()
     assert "save_checkpoint" not in content, "chat_model should not call save_checkpoint"
     print("PASS: test_checkpoint_files_preserved")

@@ -2225,6 +2225,189 @@ export async function generateStaticParams() {
             source="original",
         ))
 
+    # ===================================================================
+    # CONVERSATION DATA — user/assistant format for chat fine-tuning
+    # ===================================================================
+
+    conversations = [
+        """user: Hello
+assistant: Hello! How can I help you today? I can help with Python, JavaScript, TypeScript, React, and Next.js code.""",
+        """user: Hi
+assistant: Hi there! What can I do for you? I can write code, explain programming concepts, and help fix errors.""",
+        """user: Can you write a Python function to reverse a string?
+assistant: Sure! Here is a Python function to reverse a string:
+
+def reverse_string(s):
+    return s[::-1]
+
+print(reverse_string("hello"))  # Output: olleh""",
+        """user: How do I create a React component?
+assistant: Here is a simple React component:
+
+import { useState } from 'react';
+
+function Counter() {
+  const [count, setCount] = useState(0);
+  return (
+    <div>
+      <p>Count: {count}</p>
+      <button onClick={() => setCount(count + 1)}>Increment</button>
+    </div>
+  );
+}
+
+export default Counter;""",
+        """user: Send code for a Next.js home page
+assistant: Here is a Next.js App Router home page:
+
+// app/page.tsx
+export default function HomePage() {
+  return (
+    <main>
+      <h1>Welcome to my Next.js App</h1>
+      <p>This is the home page built with the App Router.</p>
+    </main>
+  );
+}""",
+        """user: What is the difference between let and const in JavaScript?
+assistant: Both let and const are block-scoped. let allows reassignment, while const does not. However, const objects can still have their properties modified. Use const by default and let when you need to reassign a variable.""",
+        """user: How do I handle errors in Python?
+assistant: You can handle errors in Python using try/except blocks:
+
+try:
+    result = 10 / 0
+except ZeroDivisionError as e:
+    print(f"Error: {e}")
+finally:
+    print("This always runs")""",
+        """user: What is a closure in JavaScript?
+assistant: A closure is a function that retains access to variables from its outer scope even after the outer function has returned. Example:
+
+function createCounter() {
+  let count = 0;
+  return () => ++count;
+}
+const counter = createCounter();
+console.log(counter()); // 1
+console.log(counter()); // 2""",
+        """user: How to create a TypeScript interface?
+assistant: Here is how to create a TypeScript interface:
+
+interface User {
+  id: number;
+  name: string;
+  email: string;
+  role: 'admin' | 'user';
+}
+
+const user: User = { id: 1, name: 'Alice', email: 'alice@example.com', role: 'admin' };""",
+        """user: Explain async/await in JavaScript
+assistant: async/await is syntax for handling promises in a cleaner way. An async function returns a promise, and await pauses execution until the promise resolves:
+
+async function fetchData(url) {
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error('Fetch error:', error);
+  }
+}""",
+        """user: How do I use useEffect in React?
+assistant: useEffect runs side effects after render. Example with cleanup:
+
+import { useEffect, useState } from 'react';
+
+function WindowSize() {
+  const [size, setSize] = useState(window.innerWidth);
+  useEffect(() => {
+    const handler = () => setSize(window.innerWidth);
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
+  }, []);
+  return <p>Width: {size}</p>;
+}""",
+        """user: What is the App Router in Next.js?
+assistant: The App Router is Next.js's newer routing system using the app/ directory. It supports Server Components by default, nested layouts, streaming with Suspense, and file-based routing with page.tsx, layout.tsx, loading.tsx, and error.tsx files.""",
+        """user: How to fetch data in Next.js App Router?
+assistant: In the App Router, Server Components can fetch data directly with async/await:
+
+export default async function Page() {
+  const res = await fetch('https://api.example.com/data');
+  const data = await res.json();
+  return <div>{data.title}</div>;
+}""",
+        """user: What is a decorator in Python?
+assistant: A decorator is a function that takes another function and extends its behavior without modifying it. It uses the @ syntax:
+
+def log_calls(func):
+    def wrapper(*args, **kwargs):
+        print(f'Calling {func.__name__}')
+        return func(*args, **kwargs)
+    return wrapper
+
+@log_calls
+def greet(name):
+    return f'Hello, {name}'""",
+        """user: How to create a custom hook in React?
+assistant: A custom hook is a function starting with 'use' that calls other hooks:
+
+function useLocalStorage(key, initialValue) {
+  const [value, setValue] = useState(() => {
+    return localStorage.getItem(key) || initialValue;
+  });
+  useEffect(() => {
+    localStorage.setItem(key, value);
+  }, [key, value]);
+  return [value, setValue];
+}""",
+        """user: What are generics in TypeScript?
+assistant: Generics allow you to write reusable code that works with multiple types:
+
+function identity<T>(value: T): T {
+  return value;
+}
+
+const str = identity<string>('hello');
+const num = identity<number>(42);""",
+        """user: How to use middleware in Next.js?
+assistant: Create a middleware.ts file at the project root:
+
+import { NextRequest, NextResponse } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  const token = request.cookies.get('auth-token');
+  if (!token && !request.nextUrl.pathname.startsWith('/login')) {
+    return NextResponse.redirect(new URL('/login', request.url));
+  }
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ['/dashboard/:path*'],
+};""",
+        """user: What is the event loop in JavaScript?
+assistant: The event loop handles asynchronous callbacks. JavaScript is single-threaded, so async operations place callbacks in a task queue. The event loop checks if the call stack is empty and pushes the next callback from the queue. Microtasks (Promise callbacks) are processed before macrotasks (setTimeout).""",
+        """user: How do I create a dynamic route in Next.js?
+assistant: Use bracket notation in folder names for dynamic routes:
+
+// app/blog/[slug]/page.tsx
+export default async function Page({ params }: { params: { slug: string } }) {
+  const post = await getPost(params.slug);
+  return <article><h1>{post.title}</h1></article>;
+}""",
+        """user: What is the difference between var, let, and const?
+assistant: var is function-scoped and hoisted. let and const are block-scoped. let allows reassignment, const does not. Always use const by default, let when you need reassignment, and avoid var in modern code.""",
+    ]
+
+    for text in conversations:
+        docs.append(CodeDocument(
+            text=text,
+            language="conversation",
+            category="conversation",
+            source="original",
+        ))
+
     return docs
 
 

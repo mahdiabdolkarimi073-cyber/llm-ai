@@ -59,6 +59,17 @@ class ChatModelEngine:
         with self._state_lock:
             return self._loaded
 
+    def unload(self) -> None:
+        with self._state_lock:
+            self.model = None
+            self.tokenizer = None
+            self.config = None
+            self.checkpoint_name = None
+            self._loaded = False
+
+    def _is_stopped(self) -> bool:
+        return self._stop_flag.is_set()
+
     def list_available(self) -> list[dict]:
         results = []
         for key, info in AVAILABLE_CHECKPOINTS.items():
@@ -178,6 +189,9 @@ class ChatModelEngine:
             token_limit = max(1, min(int(max_new_tokens), 256))
             top_k_value = max(1, min(int(top_k), config.vocab_size))
 
+            recent_tokens: list[int] = []
+            repeat_window = 15
+            repeat_threshold = 10
             with torch.inference_mode():
                 for _ in range(token_limit):
                     if self._stop_flag.is_set():
@@ -203,6 +217,15 @@ class ChatModelEngine:
                     next_token = torch.multinomial(probabilities, num_samples=1)
                     idx = torch.cat([idx, next_token], dim=1)
                     generated_ids.append(int(next_token.item()))
+
+                    recent_tokens.append(int(next_token.item()))
+                    if len(recent_tokens) > repeat_window:
+                        recent_tokens.pop(0)
+                    if len(recent_tokens) >= repeat_window:
+                        token_set = set(recent_tokens)
+                        if len(token_set) <= repeat_threshold:
+                            yield {"type": "done", "text": previous_text}
+                            return
 
                     current_text = tokenizer.decode(generated_ids)
                     chunk = current_text[len(previous_text):]
