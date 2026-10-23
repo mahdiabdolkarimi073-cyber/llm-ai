@@ -1,11 +1,13 @@
 {
   "test_texts": [
-    "// app/layout.tsx\nimport { Metadata } from 'next'\nimport { Inter } from 'next/font/google'\nimport './globals.css'\n\nconst inter = Inter({ subsets: ['latin'] })\n\nexport const metadata: Metadata = {\n  title: 'My Next.js App',\n  description: 'Built with App Router',\n}\n\nexport default function RootLayout({\n  children,\n}: {\n  children: React.ReactNode\n}) {\n  return (\n    <html lang=\"en\">\n      <body className={inter.className}>{children}</body>\n    </html>\n  )\n}",
+    "Q: How to create a loading state in Next.js App Router?\nA: Create a loading.tsx file in any route segment. Next.js wraps the page in a Suspense boundary automatically:\n\n// app/dashboard/loading.tsx\nexport default function Loading() {\n  return <p>Loading...</p>\n}\n\n// app/dashboard/error.tsx — error boundary\n'use client'\nexport default function Error({ error, reset }) {\n  return (\n    <div>\n      <p>{error.message}</p>\n      <button onClick={reset}>Try again</button>\n    </div>\n  )\n}\n\n// The file structure:\n// app/dashboard/\n//   page.tsx      — the page content\n//   loading.tsx   — shown while page loads\n//   error.tsx     — shown if page throws\n\nLoading and error states are scoped to their directory. Nested routes inherit parent loading states.",
     "def pipe(*functions):\n    def piped(value):\n        for func in functions:\n            value = func(value)\n        return value\n    return piped\n\nprocess = pipe(\n    lambda x: x + 1,\n    lambda x: x * 2,\n    lambda x: x - 3\n)\nprint(process(5))",
+    "user: How to use middleware in Next.js?\nassistant: Create a middleware.ts file at the project root:\n\nimport { NextRequest, NextResponse } from 'next/server';\n\nexport function middleware(request: NextRequest) {\n  const token = request.cookies.get('auth-token');\n  if (!token && !request.nextUrl.pathname.startsWith('/login')) {\n    return NextResponse.redirect(new URL('/login', request.url));\n  }\n  return NextResponse.next();\n}\n\nexport const config = {\n  matcher: ['/dashboard/:path*'],\n};",
     "def curry(func):\n    def curried(*args):\n        if len(args) >= func.__code__.co_argcount:\n            return func(*args)\n        return lambda *more: curried(*args, *more)\n    return curried\n\n@curry\ndef add(a, b, c):\n    return a + b + c\n\nprint(add(1)(2)(3))\nprint(add(1, 2)(3))\nprint(add(1, 2, 3))",
     "class EventEmitter {\n  constructor() {\n    this.events = {};\n  }\n\n  on(event, callback) {\n    if (!this.events[event]) {\n      this.events[event] = [];\n    }\n    this.events[event].push(callback);\n  }\n\n  emit(event, data) {\n    const callbacks = this.events[event] || [];\n    callbacks.forEach(cb => cb(data));\n  }\n\n  off(event, callback) {\n    this.events[event] = (this.events[event] || []).filter(cb => cb !== callback);\n  }\n}\n\nconst emitter = new EventEmitter();\nemitter.on('click', (e) => console.log('Clicked:', e));\nemitter.emit('click', { x: 10, y: 20 });",
     "function curry(fn) {\n  return function curried(...args) {\n    if (args.length >= fn.length) {\n      return fn.apply(this, args);\n    }\n    return function(...more) {\n      return curried.apply(this, [...args, ...more]);\n    };\n  };\n}\n\nconst add = curry((a, b, c) => a + b + c);\nconsole.log(add(1)(2)(3));  // 6\nconsole.log(add(1, 2)(3));  // 6\nconsole.log(add(1, 2, 3));  // 6",
     "function throttle(func, limit) {\n  let inThrottle;\n  return function(...args) {\n    if (!inThrottle) {\n      func.apply(this, args);\n      inThrottle = true;\n      setTimeout(() => inThrottle = false, limit);\n    }\n  };\n}\n\nconst onScroll = throttle(() => {\n  console.log('Scroll event handled');\n}, 200);\n\nwindow.addEventListener('scroll', onScroll);",
+    "user: What is the difference between let and const in JavaScript?\nassistant: Both let and const are block-scoped. let allows reassignment, while const does not. However, const objects can still have their properties modified. Use const by default and let when you need to reassign a variable.",
     "class Stack:\n    def __init__(self):\n        self._items = []\n\n    def push(self, item):\n        self._items.append(item)\n\n    def pop(self):\n        if self.is_empty():\n            raise IndexError('pop from empty stack')\n        return self._items.pop()\n\n    def peek(self):\n        if self.is_empty():\n            raise IndexError('peek from empty stack')\n        return self._items[-1]\n\n    def is_empty(self):\n        return len(self._items) == 0\n\n    def size(self):\n        return len(self._items)",
     "def retry(max_attempts=3, delay=1.0):\n    def decorator(func):\n        def wrapper(*args, **kwargs):\n            import time\n            for attempt in range(max_attempts):\n                try:\n                    return func(*args, **kwargs)\n                except Exception as e:\n                    if attempt == max_attempts - 1:\n                        raise\n                    time.sleep(delay)\n        return wrapper\n    return decorator\n\n@retry(max_attempts=3, delay=0.5)\ndef fetch_data():\n    import random\n    if random.random() < 0.5:\n        raise ConnectionError('Network error')\n    return 'data fetched'",
     "// lib/db.ts — Database utility for Next.js App Router\nimport { PrismaClient } from '@prisma/client'\n\nconst globalForPrisma = globalThis as unknown as { prisma: PrismaClient }\n\nexport const db = globalForPrisma.prisma || new PrismaClient()\n\nif (process.env.NODE_ENV !== 'production') {\n  globalForPrisma.prisma = db\n}\n\n// Usage in server components:\n// import { db } from '@/lib/db'\n// const users = await db.user.findMany()"
@@ -13,21 +15,25 @@
   "test_languages": [
     "nextjs",
     "python",
+    "conversation",
     "python",
     "javascript",
     "javascript",
     "javascript",
+    "conversation",
     "python",
     "python",
     "nextjs"
   ],
   "test_categories": [
+    "qa",
+    "code",
+    "conversation",
     "code",
     "code",
     "code",
     "code",
-    "code",
-    "code",
+    "conversation",
     "code",
     "code",
     "code"

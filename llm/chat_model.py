@@ -44,6 +44,16 @@ AVAILABLE_CHECKPOINTS = {
         "tokenizer": os.path.join(CHECKPOINT_DIR, "tokenizer.json"),
         "label": "مدل پایه، فاز اول",
     },
+    "conversation_fa_best": {
+        "model": os.path.join(CHECKPOINT_DIR, "conversation_fa_best.pt"),
+        "tokenizer": os.path.join(CHECKPOINT_DIR, "tokenizer_fa.json"),
+        "label": "مدل مکالمه فارسی، بهترین checkpoint",
+    },
+    "conversation_fa": {
+        "model": os.path.join(CHECKPOINT_DIR, "conversation_fa.pt"),
+        "tokenizer": os.path.join(CHECKPOINT_DIR, "tokenizer_fa.json"),
+        "label": "مدل مکالمه فارسی",
+    },
 }
 
 
@@ -202,6 +212,7 @@ class ChatModelEngine:
             recent_tokens: list[int] = []
             repeat_window = 15
             repeat_threshold = 10
+            end_id = tokenizer.special_token_id("<|end|>")
             with torch.inference_mode():
                 for _ in range(token_limit):
                     if self._stop_flag.is_set():
@@ -236,6 +247,11 @@ class ChatModelEngine:
                         if len(token_set) <= repeat_threshold:
                             yield {"type": "done", "text": previous_text}
                             return
+
+                    # Stop generation at <|end|> special token
+                    if end_id is not None and int(next_token.item()) == end_id:
+                        yield {"type": "done", "text": previous_text}
+                        return
 
                     current_text = tokenizer.decode(generated_ids)
                     chunk = current_text[len(previous_text):]

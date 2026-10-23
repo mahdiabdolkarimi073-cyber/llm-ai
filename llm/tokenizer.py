@@ -62,6 +62,15 @@ class BPETokenizer:
         self.special_tokens[token] = token_id
         self.vocab[token_id] = token.encode("utf-8")
 
+    def add_special_tokens(self, tokens: dict[str, int]) -> None:
+        """Register multiple special tokens at once."""
+        for token, token_id in tokens.items():
+            self.add_special_token(token, token_id)
+
+    def special_token_id(self, token: str) -> int | None:
+        """Return the ID of a special token, or None if not registered."""
+        return self.special_tokens.get(token)
+
     def _encode_special(self, text: str) -> list[int] | None:
         """If text is exactly a special token, return its ID. Otherwise None."""
         if text in self.special_tokens:
