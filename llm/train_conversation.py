@@ -10,10 +10,11 @@ but does NOT execute automatically — it must be invoked manually:
 
 The script:
   - Loads the best specialized checkpoint as starting weights
-  - Retrains tokenizer on combined corpus + conversation data
-  - Fine-tunes the model on the combined dataset
+  - Reuses the existing specialized tokenizer (preserves token-ID mapping)
+  - Falls back to training a new tokenizer only if the specialized one is missing
+  - Fine-tunes the model on the combined dataset with document-boundary separation
   - Saves checkpoints to checkpoints/conversation_*.pt
-  - Preserves all existing checkpoints (never overwrites)
+  - Preserves all existing checkpoints and tokenizers (never overwrites)
 
 Architecture is kept identical to the specialized model so weights transfer.
 """
@@ -54,6 +55,11 @@ SPECIALIZED_TOK = os.path.join(CHECKPOINT_DIR, "tokenizer_v2.json")
 CONV_CKPT = os.path.join(CHECKPOINT_DIR, "conversation.pt")
 CONV_BEST_CKPT = os.path.join(CHECKPOINT_DIR, "conversation_best.pt")
 CONV_TOKENIZER = os.path.join(CHECKPOINT_DIR, "tokenizer_conv.json")
+
+# Byte value used as document boundary separator (not a valid UTF-8 start byte,
+# so it will never appear in real text). This prevents cross-document token
+# sequences from being learned as patterns.
+_DOC_SEP = ord('\x00')
 TRAIN_LOG = os.path.join(LOG_DIR, "conversation_training_log.json")
 
 
@@ -112,15 +118,24 @@ def prepare_conversation_data(config: ModelConfig) -> dict:
     val_texts = [d.text for d in val_docs]
     test_texts = [d.text for d in test_docs]
 
-    print("\n[3/4] Training tokenizer on combined corpus...")
-    tokenizer = BPETokenizer(vocab_size=config.bpe_vocab_size)
-    tokenizer.train(train_texts, verbose=True)
+    # Reuse the specialized tokenizer instead of training from scratch.
+    # This preserves the existing token-ID mapping so specialized weights
+    # transfer correctly — no embedding rebuild needed.
+    if os.path.exists(SPECIALIZED_TOK):
+        print(f"\n[3/4] Loading specialized tokenizer: {SPECIALIZED_TOK}")
+        tokenizer = BPETokenizer(vocab_size=config.bpe_vocab_size)
+        tokenizer.load(SPECIALIZED_TOK)
+        print(f"  Tokenizer loaded: {tokenizer.vocab_size} tokens")
+    else:
+        print(f"\n[3/4] Specialized tokenizer not found, training from scratch...")
+        tokenizer = BPETokenizer(vocab_size=config.bpe_vocab_size)
+        tokenizer.train(train_texts, verbose=True)
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     tmp_tok = CONV_TOKENIZER + ".tmp"
     tokenizer.save(tmp_tok)
     os.replace(tmp_tok, CONV_TOKENIZER)
-    print(f"  Tokenizer saved: {tokenizer.vocab_size} tokens")
+    print(f"  Tokenizer copy saved: {CONV_TOKENIZER}")
 
     config.vocab_size = tokenizer.vocab_size
 
@@ -129,6 +144,7 @@ def prepare_conversation_data(config: ModelConfig) -> dict:
         ids = []
         for t in texts:
             ids.extend(tokenizer.encode(t))
+            ids.append(_DOC_SEP)  # document boundary — prevents cross-doc merges
         print(f"  {label}: {len(texts)} docs -> {len(ids):,} tokens")
         return ids
 
@@ -193,6 +209,22 @@ def setup_model(config: ModelConfig, actual_vocab: int) -> tuple:
         )
         return model, optimizer, 0, float('inf')
 
+    # Verify architecture compatibility before loading weights
+    arch_fields = [("n_layers", saved_config.n_layers, config.n_layers),
+                   ("n_heads", saved_config.n_heads, config.n_heads),
+                   ("hidden_dim", saved_config.hidden_dim, config.hidden_dim),
+                   ("ff_dim", saved_config.ff_dim, config.ff_dim)]
+    for name, old_val, new_val in arch_fields:
+        if old_val != new_val:
+            print(f"  Architecture mismatch: {name} ckpt={old_val} vs config={new_val}")
+            print(f"  Cannot transfer weights — training from scratch.")
+            model = GPTModel(config)
+            optimizer = torch.optim.AdamW(
+                model.parameters(), lr=config.learning_rate, betas=(0.9, 0.95),
+                weight_decay=config.weight_decay,
+            )
+            return model, optimizer, 0, float('inf')
+
     model = GPTModel(saved_config)
     meta = load_checkpoint(ckpt_path, model)
     print(f"  Loaded: step={meta['step']}, val_loss={meta['val_loss']:.4f}")
@@ -232,6 +264,11 @@ def setup_model(config: ModelConfig, actual_vocab: int) -> tuple:
         weight_decay=config.weight_decay,
     )
     return model, optimizer, 0, float('inf')
+
+
+# Number of eval intervals without improvement before stopping training.
+# Prevents overfitting when val_loss keeps rising while train_loss drops.
+PATIENCE = 5
 
 
 def run_training(config: ModelConfig, resume: bool = False):
@@ -302,6 +339,7 @@ def run_training(config: ModelConfig, resume: bool = False):
     start_time = time.time()
     last_train_loss = 0.0
     last_val_loss = 0.0
+    no_improve_count = 0
 
     try:
         for ep in range(config.max_epochs):
@@ -339,11 +377,22 @@ def run_training(config: ModelConfig, resume: bool = False):
                     )
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
+                        no_improve_count = 0
                         save_checkpoint(
                             CONV_BEST_CKPT, model, optimizer, step, ep,
                             train_loss, val_loss, config=config,
                         )
                         print(f"    -> New best val_loss: {val_loss:.4f} (saved)")
+                    else:
+                        no_improve_count += 1
+                        if no_improve_count >= PATIENCE:
+                            print(f"\n  [EARLY STOP] No improvement for {PATIENCE} evals.")
+                            print(f"  Best val_loss: {best_val_loss:.4f} at step {step - no_improve_count * config.eval_interval}")
+                            break
+
+            # Check if early stopping triggered
+            if no_improve_count >= PATIENCE:
+                break
 
             epoch_val_loss = evaluate_model(model, val_loader, config.eval_iters)
             last_val_loss = epoch_val_loss

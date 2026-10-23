@@ -19,6 +19,16 @@ from tokenizer import BPETokenizer
 CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), "checkpoints")
 
 AVAILABLE_CHECKPOINTS = {
+    "conversation_best": {
+        "model": os.path.join(CHECKPOINT_DIR, "conversation_best.pt"),
+        "tokenizer": os.path.join(CHECKPOINT_DIR, "tokenizer_conv.json"),
+        "label": "مدل مکالمه، بهترین checkpoint",
+    },
+    "conversation": {
+        "model": os.path.join(CHECKPOINT_DIR, "conversation.pt"),
+        "tokenizer": os.path.join(CHECKPOINT_DIR, "tokenizer_conv.json"),
+        "label": "مدل مکالمه",
+    },
     "specialized_best": {
         "model": os.path.join(CHECKPOINT_DIR, "specialized_best.pt"),
         "tokenizer": os.path.join(CHECKPOINT_DIR, "tokenizer_v2.json"),

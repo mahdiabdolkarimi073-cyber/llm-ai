@@ -1,0 +1,106 @@
+{
+  "persian_chat": {
+    "results": [
+      {
+        "prompt_idx": 0,
+        "prompt": "user: سلام\nassistant:",
+        "generated": "\n[value: Click()\nice@ sion s, total sion sion savade.\n\nfunction s\nprint(ify('findAllSubmit<User[]>, value: omethod: 'DEx**20000000000000000000000000000000000000000",
+        "has_persian": false,
+        "repetition_ratio": 0.13,
+        "degenerate": false
+      },
+      {
+        "prompt_idx": 1,
+        "prompt": "user: سلام، چطوری؟\nassistant:",
+        "generated": ": : o (0 (4 (4. Ex: other name: ose(4. IS s\nr src, value: ource@ queue.esrc, helpe(f, 'id: number;\n  return fn 2, ...: 4. I clo, password, password, NextResp",
+        "has_persian": false,
+        "repetition_ratio": 0.07,
+        "degenerate": false
+      },
+      {
+        "prompt_idx": 2,
+        "prompt": "user: چطور می‌توانم یک تابع پایتون بنویسم؟\nassistant:",
+        "generated": ": : : : : : : :  (: : : : : : : : : : : : : : : C (4 : ices (: : : : : : : : : : : : : :  s\n': other name se(c, de.\n\nfunction srand, helps:\n\nfunction s, NextResp",
+        "has_persian": false,
+        "repetition_ratio": 0.7,
+        "degenerate": true
+      },
+      {
+        "prompt_idx": 3,
+        "prompt": "user: یک کامپوننت React بساز\nassistant:",
+        "generated": ": : : : : : : : : : : : C (4 (4 2, value: C 0 (4. I ? queue.rcice s/()\nrcices in JS 0 queue.fify('find queue.f = id: number;\n  return fn queue.ade",
+        "has_persian": false,
+        "repetition_ratio": 0.39,
+        "degenerate": false
+      }
+    ],
+    "persian_rate": 0.0,
+    "degenerate_rate": 0.25
+  },
+  "nextjs_generation": {
+    "results": [
+      {
+        "prompt_idx": 0,
+        "generated": "s useState } from 'next/navign cookies } from 'next/naviginside a a a Passistant: Hellocard\"${s'\n\nexport default function Page({ email, setError(\n  const user: NextRequest, NextResponse.json(request.n",
+        "patterns_found": [
+          "default_export",
+          "next_import",
+          "NextResponse"
+        ],
+        "issues": []
+      },
+      {
+        "prompt_idx": 1,
+        "generated": "_calls/posts = await getPosts().slug: NextRequest) {\n  const post =>('auth-card\">\n          <p>{\n    </h3>;\n}\u0000user: NextRequest) {\n  const post =>;\u0000function id\">\n          <p>{\n    reassistant: Helloc",
+        "patterns_found": [
+          "next_import",
+          "NextResponse"
+        ],
+        "issues": [
+          "Unbalanced braces"
+        ]
+      }
+    ],
+    "total_patterns": 5,
+    "total_issues": 1,
+    "avg_patterns": 2.5
+  },
+  "code_language_match": {
+    "python": {
+      "samples": [
+        {
+          "prompt_idx": 0,
+          "generated": "T]\n    def wrapper(*args, **kwargs)\ndef wrapper(*args, **kwargs)\ndef roned, 3]\ndef wrapper, 3, def wrapper(*args, **kwargs):\n            last_calls:\n ",
+          "repetition_ratio": 0.36
+        }
+      ],
+      "avg_repetition": 0.36
+    },
+    "javascript": {
+      "samples": [
+        {
+          "prompt_idx": 0,
+          "generated": "observers.subscribe(m = observers.subscribe(fy(x) {\n    e(idx) {\n    return fns.subscribe(m = x: x => console.log('Submit<User, 'idx = idx) {\n    e(id",
+          "repetition_ratio": 0.18
+        }
+      ],
+      "avg_repetition": 0.18
+    },
+    "react": {
+      "samples": [
+        {
+          "prompt_idx": 0,
+          "generated": "coer, toggleTodo(todo.id, toggleTodo(todo.id), [data, input\n        type=\"subject.\n\n// useCallback } from 'next/naviginnerHelloopen(fs(prev => prev =>",
+          "repetition_ratio": 0.73
+        }
+      ],
+      "avg_repetition": 0.73
+    }
+  },
+  "test_perplexity": {
+    "loss": 5.336075716548496,
+    "perplexity": 207.69606018066406,
+    "test_tokens": 1279,
+    "test_docs": 9
+  }
+}
